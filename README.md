@@ -507,3 +507,11 @@ each is a small, swappable adapter behind an interface.
 ## License
 
 MIT © react-native-smart-retry contributors — see [LICENSE](LICENSE).
+
+## ☕ Buy Me a Coffee
+
+If you find my work helpful, consider supporting me by buying me a coffee! Your support helps me keep working on open-source projects and creating more content.  
+
+<a href="https://www.buymeacoffee.com/adityarajput" target="_blank">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="180">
+</a>
