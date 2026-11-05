@@ -1,6 +1,6 @@
 {
   "name": "react-native-smart-retry",
-  "version": "1.1.0,
+  "version": "1.1.0",
   "description": "Offline-first requests for React Native: a persistent queue that survives restarts and replays in order when the network returns, with retries, backoff, token refresh, and a React hook.",
   "main": "lib/commonjs/index.js",
   "module": "lib/module/index.js",
