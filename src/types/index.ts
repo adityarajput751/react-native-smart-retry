@@ -10,7 +10,18 @@ export type QueueStatus = 'pending' | 'processing' | 'failed';
 
 /** Classification of why a request failed, used to decide retry behavior. */
 export type RetryReason =
-  'NETWORK_ERROR' | 'TIMEOUT' | 'SERVER_ERROR' | 'RATE_LIMIT' | 'CLIENT_ERROR' | 'UNKNOWN';
+  | 'NETWORK_ERROR'
+  | 'TIMEOUT'
+  | 'SERVER_ERROR'
+  | 'RATE_LIMIT'
+  | 'CLIENT_ERROR'
+  /** Cancelled by the caller's `signal`, or by removing a request mid-flight. Never retried or queued. */
+  | 'ABORTED'
+  /** A queued request outlived `maxRequestAge`. */
+  | 'EXPIRED'
+  /** The queue is at `maxQueueSize` and the request could not be stored. */
+  | 'QUEUE_FULL'
+  | 'UNKNOWN';
 
 /** Backoff strategies supported by the retry engine. */
 export type RetryStrategy = 'fixed' | 'linear' | 'exponential' | 'exponential-jitter';
@@ -23,6 +34,11 @@ export interface SerializedError {
   reason: RetryReason;
   isNetworkError: boolean;
   isTimeout: boolean;
+  /**
+   * Parsed response body of a failed HTTP response (e.g. validation messages
+   * from a `422`). Delivered to results and `onFailure`, never written to storage.
+   */
+  data?: unknown;
 }
 
 /**
@@ -53,6 +69,12 @@ export interface QueuedRequest {
    * immediate (pre-queue) attempt, never to replays after an app restart.
    */
   retryOnStatusCodes?: number[];
+  /** Backoff strategy for replays. Falls back to the global default when unset. */
+  strategy?: RetryStrategy;
+  /** Base backoff delay (ms) for replays. Falls back to the global default when unset. */
+  baseDelay?: number;
+  /** Maximum backoff delay (ms) for replays. Falls back to the global default when unset. */
+  maxDelay?: number;
   /** Earliest time (ms epoch) this request is eligible to be attempted again, set after a retryable failure. */
   nextAttemptAt?: number;
 }
@@ -105,7 +127,12 @@ export interface SmartRetryRequestOptions {
 export interface SmartRetrySuccessResult<T = unknown> {
   status: 'success';
   queued: false;
+  /** Parsed response body. */
   response: T;
+  /** HTTP status code of the response. */
+  httpStatus: number;
+  /** Response headers, with lower-cased names. */
+  headers: Record<string, string>;
 }
 
 export interface SmartRetryQueuedResult {
@@ -141,6 +168,14 @@ export interface NetworkState {
 /** Listener signature for network state changes. */
 export type NetworkListener = (state: NetworkState) => void;
 
+/** The parts of a request that `beforeRequest` may change. */
+export interface PreparedRequest {
+  url: string;
+  method: HttpMethod;
+  headers?: Record<string, string>;
+  data?: unknown;
+}
+
 /** Event callbacks that can be registered via `SmartRetry.configure()`. */
 export interface SmartRetryEvents {
   onQueued?: (request: QueuedRequest) => void;
@@ -165,18 +200,45 @@ export interface SmartRetryConfig extends SmartRetryEvents {
   baseDelay?: number;
   /** Default max delay in ms. Default: 30000. */
   maxDelay?: number;
-  /** Default max retries before a queued request is marked 'failed'. Default: 5. */
+  /** Default max retries before a queued request is marked 'failed'. Default: 3. */
   retries?: number;
   /** Default request timeout in ms. Default: 15000. */
   timeout?: number;
   /** HTTP status codes considered retryable by default. */
   retryOnStatusCodes?: number[];
-  /** HTTP methods that queued requests are allowed to auto-retry. Default: all methods once queued. */
-  retryMethods?: HttpMethod[];
   /**
-   * Threshold (ms) after which a request stuck in 'processing' (e.g. due to a
-   * crash mid-request) is considered stale and reset to 'pending' on init.
-   * Default: 60000.
+   * Unsafe methods (POST/PUT/PATCH/DELETE) allowed to retry in-process on the
+   * immediate attempt. Does not affect queued replays, which always retry.
+   */
+  retryMethods?: HttpMethod[];
+  /** Prepended to any request `url` that is not already absolute. */
+  baseURL?: string;
+  /**
+   * Runs before every attempt, including queued replays after a restart.
+   * Return the request to send. This is the place to attach a fresh auth token,
+   * so tokens never need to be persisted with the queue.
+   */
+  beforeRequest?: (request: PreparedRequest) => PreparedRequest | Promise<PreparedRequest>;
+  /**
+   * Called when a request gets a `401`. Resolve `true` after refreshing your
+   * session to retry that request once, through `beforeRequest`. Concurrent
+   * `401`s share a single call.
+   */
+  onUnauthorized?: (error: SerializedError) => boolean | Promise<boolean>;
+  /**
+   * Maximum number of stored requests. When full, the oldest `failed` request
+   * is evicted; if there is none, the new request resolves as `failed` with
+   * reason `QUEUE_FULL`. Default: unlimited.
+   */
+  maxQueueSize?: number;
+  /**
+   * Maximum age (ms) of a queued request. Older requests are marked `failed`
+   * with reason `EXPIRED` instead of being sent. Default: unlimited.
+   */
+  maxRequestAge?: number;
+  /**
+   * @deprecated No longer used. Requests interrupted by a crash are now
+   * recovered on the next processing pass, with no waiting period.
    */
   staleProcessingThresholdMs?: number;
   /**

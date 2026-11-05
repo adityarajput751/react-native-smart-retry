@@ -2,7 +2,10 @@ import { generateRequestId } from '../utils/id';
 import type { QueuedRequest, SmartRetryRequestOptions } from '../types';
 
 /** Builds a fresh {@link QueuedRequest} record from request options. */
-export function createQueueItem(options: SmartRetryRequestOptions): QueuedRequest {
+export function createQueueItem(
+  options: SmartRetryRequestOptions,
+  initial?: Pick<QueuedRequest, 'lastError' | 'nextAttemptAt'>
+): QueuedRequest {
   const now = Date.now();
   return {
     id: generateRequestId(),
@@ -19,6 +22,11 @@ export function createQueueItem(options: SmartRetryRequestOptions): QueuedReques
     timeout: options.timeout,
     maxRetries: options.retries,
     retryOnStatusCodes: options.retryOnStatusCodes,
+    strategy: options.strategy,
+    baseDelay: options.baseDelay,
+    maxDelay: options.maxDelay,
+    lastError: initial?.lastError,
+    nextAttemptAt: initial?.nextAttemptAt,
   };
 }
 

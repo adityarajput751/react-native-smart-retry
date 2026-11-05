@@ -60,7 +60,10 @@ export class NetworkManager {
     }
     try {
       const state = await this.monitor.fetch();
-      this.currentState = state;
+      // Only cache while subscribed: nothing would update the cached value otherwise.
+      if (this.unsubscribeMonitor) {
+        this.currentState = state;
+      }
       return isOnlineState(state);
     } catch (error) {
       logger.warn('Failed to determine network state; assuming online.', error);
@@ -140,12 +143,17 @@ export function createDefaultNetworkMonitor(): NetworkMonitor {
       },
     };
   } catch {
-    logger.warn(
-      '@react-native-community/netinfo is not installed; falling back to an always-online monitor. ' +
-        'Install it for automatic offline detection and sync-on-reconnect.'
-    );
+    let warned = false;
     return {
       async fetch(): Promise<NetworkState> {
+        // Warned here rather than at construction, which runs before `configure({ debug })`.
+        if (!warned) {
+          warned = true;
+          logger.warn(
+            '@react-native-community/netinfo is not installed; falling back to an always-online monitor. ' +
+              'Install it for automatic offline detection and sync-on-reconnect.'
+          );
+        }
         return { isConnected: true, isInternetReachable: null };
       },
       addEventListener(): () => void {

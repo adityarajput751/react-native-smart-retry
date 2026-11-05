@@ -33,7 +33,7 @@ interface TestSetup {
   executeRequest: jest.MockedFunction<QueueRequestExecutor>;
 }
 
-function setup(options?: { staleProcessingThresholdMs?: number }): TestSetup {
+function setup(): TestSetup {
   const storage = new AsyncStorageStorage(createMemoryAsyncStorage());
   const monitor = new FakeNetworkMonitor();
   const networkManager = new NetworkManager(monitor);
@@ -47,12 +47,18 @@ function setup(options?: { staleProcessingThresholdMs?: number }): TestSetup {
     executeRequest,
     events,
     getPolicy: () => ({ ...DEFAULT_RETRY_POLICY, baseDelay: 5, maxDelay: 20 }),
-    staleProcessingThresholdMs: options?.staleProcessingThresholdMs ?? 60000,
     logger: new Logger(false),
   });
 
+  activeProcessors.push(processor);
   return { processor, storage, networkManager, monitor, events, executeRequest };
 }
+
+const activeProcessors: QueueProcessor[] = [];
+
+afterEach(() => {
+  activeProcessors.splice(0).forEach((processor) => processor.destroy());
+});
 
 describe('QueueProcessor', () => {
   it('processes requests strictly in FIFO order (by creation time)', async () => {
@@ -157,7 +163,9 @@ describe('QueueProcessor', () => {
 
   it('applies the retry policy for a retryable server error, keeping the request pending with an incremented retryCount', async () => {
     const { processor, storage, executeRequest } = setup();
-    executeRequest.mockRejectedValue(new RetryError({ message: 'server', reason: 'SERVER_ERROR', status: 500 }));
+    executeRequest.mockRejectedValue(
+      new RetryError({ message: 'server', reason: 'SERVER_ERROR', status: 500 })
+    );
     await storage.add(makeRequest({ id: 'A', maxRetries: 5 }));
 
     await processor.process();
@@ -172,7 +180,9 @@ describe('QueueProcessor', () => {
 
   it('marks a request failed once its retry budget is exhausted', async () => {
     const { processor, storage, executeRequest } = setup();
-    executeRequest.mockRejectedValue(new RetryError({ message: 'server', reason: 'SERVER_ERROR', status: 500 }));
+    executeRequest.mockRejectedValue(
+      new RetryError({ message: 'server', reason: 'SERVER_ERROR', status: 500 })
+    );
     await storage.add(makeRequest({ id: 'A', maxRetries: 0 }));
 
     await processor.process();
@@ -182,31 +192,21 @@ describe('QueueProcessor', () => {
     processor.destroy();
   });
 
-  it('recovers a request stuck in "processing" past the stale threshold (simulating an app crash mid-request)', async () => {
-    const { processor, storage, executeRequest } = setup({ staleProcessingThresholdMs: 100 });
-    executeRequest.mockResolvedValue({ status: 200, data: {} });
+  it('recovers a request interrupted by a crash immediately, in FIFO position', async () => {
+    const { processor, storage, executeRequest } = setup();
+    const order: string[] = [];
+    executeRequest.mockImplementation(async (request) => {
+      order.push(request.id);
+      return { status: 200, data: {} };
+    });
 
-    await storage.add(
-      makeRequest({ id: 'A', status: 'processing', updatedAt: Date.now() - 1000, createdAt: Date.now() - 2000 })
-    );
-
-    await processor.process();
-
-    expect(executeRequest).toHaveBeenCalledTimes(1);
-    expect(await storage.get('A')).toBeNull();
-  });
-
-  it('does not recover a "processing" request that is still within the stale threshold', async () => {
-    const { processor, storage, executeRequest } = setup({ staleProcessingThresholdMs: 60000 });
-    executeRequest.mockResolvedValue({ status: 200, data: {} });
-
-    await storage.add(makeRequest({ id: 'A', status: 'processing', updatedAt: Date.now() }));
+    await storage.add(makeRequest({ id: 'A', status: 'processing', updatedAt: Date.now(), createdAt: 1 }));
+    await storage.add(makeRequest({ id: 'B', createdAt: 2 }));
 
     await processor.process();
 
-    expect(executeRequest).not.toHaveBeenCalled();
-    const a = await storage.get('A');
-    expect(a?.status).toBe('processing');
+    expect(order).toEqual(['A', 'B']);
+    expect(await storage.getAll()).toHaveLength(0);
   });
 
   it('never runs two processing passes concurrently', async () => {

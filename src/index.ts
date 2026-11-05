@@ -1,26 +1,10 @@
-import { SmartRetryClient } from './core/SmartRetry';
-
-/**
- * The default SmartRetry singleton. Call `SmartRetry.initialize()` once near
- * your app's root (e.g. in a top-level `useEffect`) before issuing requests.
- *
- * ```ts
- * import { SmartRetry } from 'react-native-smart-retry';
- *
- * await SmartRetry.initialize();
- *
- * const result = await SmartRetry.request({
- *   url: 'https://api.example.com/attendance',
- *   method: 'POST',
- *   data: { employeeId: 123 },
- *   queue: true,
- * });
- * ```
- */
-export const SmartRetry = new SmartRetryClient();
+export { SmartRetry } from './core/instance';
+export { useSmartRetryQueue } from './hooks/useSmartRetryQueue';
+export type { SmartRetryQueueState } from './hooks/useSmartRetryQueue';
 
 export { SmartRetryClient, createSmartRetry } from './core/SmartRetry';
 export type { SmartRetryClientOptions } from './core/SmartRetry';
+export type { QueueEventMap } from './queue/QueueEvents';
 
 export type { QueueStorage } from './storage/QueueStorage';
 export { AsyncStorageStorage } from './storage/AsyncStorageStorage';
@@ -43,6 +27,7 @@ export {
   isRetryable,
   parseRetryAfter,
   serializeError,
+  shouldQueue,
 } from './errors/ErrorClassifier';
 export { RetryError } from './errors/RetryError';
 
@@ -50,12 +35,13 @@ export { AppLifecycleManager } from './lifecycle/AppLifecycleManager';
 export type { AppLifecycleState, AppStateLike } from './lifecycle/AppLifecycleManager';
 
 export { FetchAdapter } from './adapters/FetchAdapter';
-export type { FetchAdapterRequest, FetchAdapterResponse } from './adapters/FetchAdapter';
+export type { FetchAdapterRequest, FetchAdapterResponse, RequestSender } from './adapters/FetchAdapter';
 
 export type {
   HttpMethod,
   NetworkListener,
   NetworkState,
+  PreparedRequest,
   QueuedRequest,
   QueueStatus,
   RetryInfo,

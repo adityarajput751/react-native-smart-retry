@@ -1,7 +1,7 @@
 {
   "name": "react-native-smart-retry",
-  "version": "0.1.0",
-  "description": "A persistent, mobile-aware offline API request queue for React Native with automatic retry, exponential backoff, and FIFO sync when connectivity returns.",
+  "version": "0.2.0",
+  "description": "Offline-first requests for React Native: a persistent queue that survives restarts and replays in order when the network returns, with retries, backoff, token refresh, and a React hook.",
   "main": "lib/commonjs/index.js",
   "module": "lib/module/index.js",
   "types": "lib/typescript/index.d.ts",
@@ -21,23 +21,43 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "lint": "ESLINT_USE_FLAT_CONFIG=true eslint \"src/**/*.ts\"",
-    "lint:fix": "ESLINT_USE_FLAT_CONFIG=true eslint \"src/**/*.ts\" --fix",
-    "typecheck": "tsc --noEmit",
-    "format": "prettier --write \"src/**/*.{ts,tsx}\""
+    "lint": "ESLINT_USE_FLAT_CONFIG=true eslint \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "lint:fix": "ESLINT_USE_FLAT_CONFIG=true eslint \"src/**/*.ts\" \"tests/**/*.ts\" --fix",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\" \"tests/**/*.ts\"",
+    "check": "npm run typecheck && npm run lint && npm run test:coverage",
+    "prepublishOnly": "npm run check"
   },
   "keywords": [
     "react-native",
+    "expo",
     "offline",
-    "queue",
-    "retry",
-    "network",
+    "offline-first",
+    "offline-queue",
+    "request-queue",
+    "background-sync",
     "sync",
+    "retry",
+    "exponential-backoff",
+    "fetch",
+    "network",
+    "netinfo",
+    "async-storage",
     "persistence",
+    "idempotency",
     "api"
   ],
-  "author": "",
+  "author": "adityarajput751",
   "license": "MIT",
+  "homepage": "https://github.com/adityarajput751/react-native-smart-retry#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adityarajput751/react-native-smart-retry.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adityarajput751/react-native-smart-retry/issues"
+  },
+  "funding": "https://www.buymeacoffee.com/adityarajput",
   "peerDependencies": {
     "@react-native-async-storage/async-storage": ">=1.19.0",
     "@react-native-community/netinfo": ">=9.0.0",
@@ -58,6 +78,7 @@
     "@types/jest": "^29.5.12",
     "@types/node": "^20.12.7",
     "@types/react": "^18.2.79",
+    "@types/react-test-renderer": "^18.3.2",
     "@typescript-eslint/eslint-plugin": "^7.7.0",
     "@typescript-eslint/parser": "^7.7.0",
     "eslint": "^8.57.0",
@@ -68,6 +89,7 @@
     "react": "18.2.0",
     "react-native": "0.74.1",
     "react-native-builder-bob": "^0.23.2",
+    "react-test-renderer": "^18.2.0",
     "rimraf": "^5.0.5",
     "ts-jest": "^29.1.2",
     "typescript": "^5.4.5"

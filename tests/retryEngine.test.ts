@@ -15,9 +15,15 @@ describe('calculateDelay', () => {
   });
 
   it('doubles per attempt for exponential strategy', () => {
-    expect(calculateDelay({ attempt: 1, strategy: 'exponential', baseDelay: 1000, maxDelay: 30000 })).toBe(1000);
-    expect(calculateDelay({ attempt: 2, strategy: 'exponential', baseDelay: 1000, maxDelay: 30000 })).toBe(2000);
-    expect(calculateDelay({ attempt: 4, strategy: 'exponential', baseDelay: 1000, maxDelay: 30000 })).toBe(8000);
+    expect(calculateDelay({ attempt: 1, strategy: 'exponential', baseDelay: 1000, maxDelay: 30000 })).toBe(
+      1000
+    );
+    expect(calculateDelay({ attempt: 2, strategy: 'exponential', baseDelay: 1000, maxDelay: 30000 })).toBe(
+      2000
+    );
+    expect(calculateDelay({ attempt: 4, strategy: 'exponential', baseDelay: 1000, maxDelay: 30000 })).toBe(
+      8000
+    );
   });
 
   it('never exceeds maxDelay', () => {
@@ -27,7 +33,12 @@ describe('calculateDelay', () => {
 
   it('applies jitter within 0.8x-1.2x of the exponential value for exponential-jitter', () => {
     for (let attempt = 1; attempt <= 5; attempt++) {
-      const delay = calculateDelay({ attempt, strategy: 'exponential-jitter', baseDelay: 1000, maxDelay: 30000 });
+      const delay = calculateDelay({
+        attempt,
+        strategy: 'exponential-jitter',
+        baseDelay: 1000,
+        maxDelay: 30000,
+      });
       const exponential = 1000 * 2 ** (attempt - 1);
       expect(delay).toBeGreaterThanOrEqual(exponential * 0.8 - 0.01);
       expect(delay).toBeLessThanOrEqual(exponential * 1.2 + 0.01);
@@ -36,10 +47,22 @@ describe('calculateDelay', () => {
 
   it('prioritizes an explicit retryAfterMs over the strategy, still bounded by maxDelay', () => {
     expect(
-      calculateDelay({ attempt: 1, strategy: 'exponential', baseDelay: 1000, maxDelay: 30000, retryAfterMs: 9000 })
+      calculateDelay({
+        attempt: 1,
+        strategy: 'exponential',
+        baseDelay: 1000,
+        maxDelay: 30000,
+        retryAfterMs: 9000,
+      })
     ).toBe(9000);
     expect(
-      calculateDelay({ attempt: 1, strategy: 'exponential', baseDelay: 1000, maxDelay: 5000, retryAfterMs: 9000 })
+      calculateDelay({
+        attempt: 1,
+        strategy: 'exponential',
+        baseDelay: 1000,
+        maxDelay: 5000,
+        retryAfterMs: 9000,
+      })
     ).toBe(5000);
   });
 });

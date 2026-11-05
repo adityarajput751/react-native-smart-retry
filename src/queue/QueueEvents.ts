@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import type { NetworkState, QueuedRequest, RetryInfo, SerializedError } from '../types';
 
 export interface QueueEventMap {
@@ -8,6 +9,8 @@ export interface QueueEventMap {
   queueStart: undefined;
   queueComplete: { processed: number; succeeded: number; failed: number };
   networkChange: NetworkState;
+  /** The stored queue changed: a request was added, removed, rescheduled, or finished. */
+  queueChanged: undefined;
 }
 
 type EventListener<T> = (payload: T) => void;
@@ -33,7 +36,15 @@ export class QueueEventEmitter {
     if (!set || set.size === 0) {
       return;
     }
-    set.forEach((listener) => (listener as EventListener<QueueEventMap[K]>)(payload));
+    // A throwing listener is an app bug. It must never change the outcome of the
+    // queue operation that emitted the event, so isolate it and report it.
+    set.forEach((listener) => {
+      try {
+        (listener as EventListener<QueueEventMap[K]>)(payload);
+      } catch (error) {
+        logger.error(`Listener for "${String(event)}" threw`, error);
+      }
+    });
   }
 
   removeAllListeners(): void {

@@ -1,14 +1,15 @@
-import type { FetchAdapter, FetchAdapterResponse } from '../adapters/FetchAdapter';
+import type { FetchAdapterResponse, RequestSender } from '../adapters/FetchAdapter';
 import { classifyThrownError } from '../errors/ErrorClassifier';
-import { RetryError } from '../errors/RetryError';
+import type { RetryError } from '../errors/RetryError';
 import type { RetryEngine } from '../retry/RetryEngine';
 import type { RetryPolicy } from '../retry/RetryPolicy';
 import type { RetryInfo, SmartRetryRequestOptions } from '../types';
 import { generateRequestId } from '../utils/id';
 
 export interface RequestManagerDependencies {
-  fetchAdapter: FetchAdapter;
+  send: RequestSender;
   retryEngine: RetryEngine;
+  getDefaultTimeout: () => number;
   onRetry?: (info: RetryInfo) => void;
 }
 
@@ -17,18 +18,20 @@ export type RequestExecutionResult<T> =
 
 /**
  * Executes a single immediate (non-queued) request, applying in-process
- * retry-with-backoff for transient failures (network blips, timeouts,
- * retryable server errors) via the RetryEngine. Never touches the persistent
- * queue — that decision is made by the caller based on the final result.
+ * retry-with-backoff for transient failures via the RetryEngine. Never touches
+ * the persistent queue — that decision is made by the caller based on the
+ * final result.
  */
 export class RequestManager {
-  private readonly fetchAdapter: FetchAdapter;
+  private readonly send: RequestSender;
   private readonly retryEngine: RetryEngine;
+  private readonly getDefaultTimeout: () => number;
   private readonly onRetry: ((info: RetryInfo) => void) | undefined;
 
   constructor(deps: RequestManagerDependencies) {
-    this.fetchAdapter = deps.fetchAdapter;
+    this.send = deps.send;
     this.retryEngine = deps.retryEngine;
+    this.getDefaultTimeout = deps.getDefaultTimeout;
     this.onRetry = deps.onRetry;
   }
 
@@ -41,12 +44,12 @@ export class RequestManager {
     try {
       const response = await this.retryEngine.executeWithRetry<FetchAdapterResponse<T>>(
         () =>
-          this.fetchAdapter.execute<T>({
+          this.send<T>({
             url: options.url,
             method: options.method,
             headers: options.headers,
             data: options.data,
-            timeout: options.timeout,
+            timeout: options.timeout ?? this.getDefaultTimeout(),
             idempotencyKey: options.idempotencyKey,
             signal: options.signal,
             retryOnStatusCodes: policy.retryOnStatusCodes,
@@ -62,8 +65,7 @@ export class RequestManager {
       );
       return { ok: true, response };
     } catch (rawError) {
-      const error = rawError instanceof RetryError ? rawError : classifyThrownError(rawError);
-      return { ok: false, error };
+      return { ok: false, error: classifyThrownError(rawError) };
     }
   }
 }

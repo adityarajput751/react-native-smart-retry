@@ -14,7 +14,10 @@ export interface QueueRequestExecutionResult {
   data: unknown;
 }
 
-export type QueueRequestExecutor = (request: QueuedRequest) => Promise<QueueRequestExecutionResult>;
+export type QueueRequestExecutor = (
+  request: QueuedRequest,
+  signal: AbortSignal
+) => Promise<QueueRequestExecutionResult>;
 
 export interface QueueProcessorOptions {
   storage: QueueStorage;
@@ -22,15 +25,17 @@ export interface QueueProcessorOptions {
   executeRequest: QueueRequestExecutor;
   events: QueueEventEmitter;
   getPolicy: () => RetryPolicy;
-  staleProcessingThresholdMs: number;
+  getMaxRequestAge?: () => number | undefined;
   logger: Logger;
 }
 
 /**
  * Processes the persistent queue strictly in FIFO order, one request at a
- * time. Guarantees only a single processing run is ever active (concurrent
- * `process()` calls attach to the in-flight run) and never deletes a request
- * from storage until its replay has actually succeeded.
+ * time. Guarantees only a single processing run is ever active and never
+ * deletes a request from storage until its replay has actually succeeded.
+ *
+ * Delivery is at-least-once: a crash after the server handled a request but
+ * before it was removed here replays that request.
  */
 export class QueueProcessor {
   private readonly storage: QueueStorage;
@@ -38,11 +43,16 @@ export class QueueProcessor {
   private readonly executeRequest: QueueRequestExecutor;
   private readonly events: QueueEventEmitter;
   private readonly getPolicy: () => RetryPolicy;
-  private readonly staleProcessingThresholdMs: number;
+  private readonly getMaxRequestAge: () => number | undefined;
   private readonly logger: Logger;
 
   private inFlight: Promise<void> | null = null;
+  private rerunRequested = false;
+  private forceRequested = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private current: { id: string; controller: AbortController } | null = null;
+  /** Consecutive connectivity failures, driving backoff. Kept in memory: they never use up a request's retries. */
+  private connectivityFailures = 0;
   private destroyed = false;
   private paused = false;
 
@@ -52,22 +62,27 @@ export class QueueProcessor {
     this.executeRequest = options.executeRequest;
     this.events = options.events;
     this.getPolicy = options.getPolicy;
-    this.staleProcessingThresholdMs = options.staleProcessingThresholdMs;
+    this.getMaxRequestAge = options.getMaxRequestAge ?? (() => undefined);
     this.logger = options.logger;
   }
 
   /**
-   * Runs (or attaches to) a single processing pass over the queue. Concurrent
-   * calls never spawn a second processor — they resolve once the in-flight
-   * run completes.
+   * Runs a processing pass over the queue. Calls made during a run join it and
+   * trigger one more pass when it ends, so anything added meanwhile is picked
+   * up. `force` ignores backoff delays for that pass.
    */
-  process(): Promise<void> {
+  process(options?: { force?: boolean }): Promise<void> {
+    if (options?.force) {
+      this.forceRequested = true;
+    }
+
     if (this.inFlight) {
+      this.rerunRequested = true;
       return this.inFlight;
     }
 
     this.clearRetryTimer();
-    this.inFlight = this.run().finally(() => {
+    this.inFlight = this.runUntilSettled().finally(() => {
       this.inFlight = null;
     });
     return this.inFlight;
@@ -75,6 +90,11 @@ export class QueueProcessor {
 
   isProcessing(): boolean {
     return this.inFlight !== null;
+  }
+
+  /** Re-enables processing after {@link destroy}. */
+  start(): void {
+    this.destroyed = false;
   }
 
   pause(): void {
@@ -90,12 +110,29 @@ export class QueueProcessor {
     this.logger.log('Queue resumed (app foregrounded)');
   }
 
+  /** Cancels the in-flight replay, optionally only if it is for request `id`. */
+  abortCurrent(id?: string): void {
+    if (this.current && (id === undefined || this.current.id === id)) {
+      this.current.controller.abort();
+    }
+  }
+
   destroy(): void {
     this.destroyed = true;
+    this.paused = false;
     this.clearRetryTimer();
   }
 
-  private async run(): Promise<void> {
+  private async runUntilSettled(): Promise<void> {
+    do {
+      this.rerunRequested = false;
+      const force = this.forceRequested;
+      this.forceRequested = false;
+      await this.run(force);
+    } while (this.rerunRequested && !this.destroyed && !this.paused);
+  }
+
+  private async run(force: boolean): Promise<void> {
     if (this.paused) {
       this.logger.log('Skipping queue processing: paused');
       return;
@@ -107,28 +144,44 @@ export class QueueProcessor {
       return;
     }
 
-    await this.recoverStaleProcessing();
+    await this.recoverInterrupted();
 
     const all = await this.storage.getAll();
     const pending = sortByCreatedAt(all.filter((request) => request.status === 'pending'));
 
-    if (pending.length === 0) {
-      return;
-    }
-
-    this.events.emit('queueStart', undefined);
-    this.logger.log('Queue processing started');
-
+    let started = false;
     let processed = 0;
     let succeeded = 0;
     let failed = 0;
 
-    for (const request of pending) {
+    const markStarted = (): void => {
+      if (!started) {
+        started = true;
+        this.events.emit('queueStart', undefined);
+        this.logger.log('Queue processing started');
+      }
+    };
+
+    for (const { id } of pending) {
       if (this.destroyed || this.paused) {
         break;
       }
 
-      if (request.nextAttemptAt && request.nextAttemptAt > Date.now()) {
+      // Re-read: the app may have removed or cleared this request during the run.
+      const request = await this.storage.get(id);
+      if (!request || request.status !== 'pending') {
+        continue;
+      }
+
+      if (this.isExpired(request)) {
+        markStarted();
+        await this.expire(request);
+        processed++;
+        failed++;
+        continue;
+      }
+
+      if (!force && request.nextAttemptAt && request.nextAttemptAt > Date.now()) {
         this.scheduleRetryTimer(request.nextAttemptAt - Date.now());
         break;
       }
@@ -138,47 +191,66 @@ export class QueueProcessor {
         break;
       }
 
+      markStarted();
       this.logger.log(`Processing ${request.id}`);
       await this.storage.update(request.id, { status: 'processing', updatedAt: Date.now() });
 
+      const controller = new AbortController();
+      this.current = { id: request.id, controller };
+
+      let response: QueueRequestExecutionResult;
       try {
-        const result = await this.executeRequest(request);
-        await this.storage.remove(request.id);
-        this.logger.log('Request successful');
-        this.logger.log(`Removed ${request.id}`);
-        this.events.emit('success', { request, response: result.data });
-        processed++;
-        succeeded++;
+        response = await this.executeRequest(request, controller.signal);
       } catch (rawError) {
+        this.current = null;
+        if (!(await this.storage.get(request.id))) {
+          continue;
+        }
         const outcome = await this.handleFailure(request, rawError);
         processed++;
         if (outcome === 'failed') {
           failed++;
+          continue;
         }
-        if (outcome === 'stop') {
-          break;
-        }
+        break;
       }
+
+      this.current = null;
+      this.connectivityFailures = 0;
+      processed++;
+      succeeded++;
+
+      await this.storage.remove(request.id);
+      this.logger.log('Request successful');
+      this.logger.log(`Removed ${request.id}`);
+      this.events.emit('success', { request, response: response.data });
     }
 
-    this.logger.log('Queue processing completed');
-    this.events.emit('queueComplete', { processed, succeeded, failed });
+    if (started) {
+      this.logger.log('Queue processing completed');
+      this.events.emit('queueComplete', { processed, succeeded, failed });
+    }
   }
 
-  private async handleFailure(
-    request: QueuedRequest,
-    rawError: unknown
-  ): Promise<'continue' | 'stop' | 'failed'> {
+  private async handleFailure(request: QueuedRequest, rawError: unknown): Promise<'stop' | 'failed'> {
     const error = rawError instanceof RetryError ? rawError : classifyThrownError(rawError);
-    const policy = this.getPolicy();
+    const policy = this.resolvePolicy(request);
+    const lastError = serializeError(error);
+
+    if (error.reason === 'ABORTED') {
+      await this.storage.update(request.id, { status: 'pending', updatedAt: Date.now() });
+      return 'stop';
+    }
 
     if (error.isNetworkError || error.isTimeout) {
       this.logger.log('Request failed');
-      await this.storage.update(request.id, {
-        status: 'pending',
-        updatedAt: Date.now(),
-        lastError: serializeError(error),
-      });
+      await this.storage.update(request.id, { status: 'pending', updatedAt: Date.now(), lastError });
+      this.connectivityFailures++;
+      // The device can report "online" while the server is unreachable, in which
+      // case no reconnect event will ever arrive to restart the queue.
+      if (await this.networkManager.isOnline()) {
+        this.scheduleRetryTimer(calculateDelay({ ...policy, attempt: this.connectivityFailures }));
+      }
       return 'stop';
     }
 
@@ -194,21 +266,14 @@ export class QueueProcessor {
 
     if (canRetry) {
       const nextRetryCount = request.retryCount + 1;
-      const delay = calculateDelay({
-        attempt: nextRetryCount,
-        strategy: policy.strategy,
-        baseDelay: policy.baseDelay,
-        maxDelay: policy.maxDelay,
-        retryAfterMs: error.retryAfterMs,
-      });
-      const nextAttemptAt = Date.now() + delay;
+      const delay = calculateDelay({ ...policy, attempt: nextRetryCount, retryAfterMs: error.retryAfterMs });
 
       await this.storage.update(request.id, {
         status: 'pending',
         updatedAt: Date.now(),
         retryCount: nextRetryCount,
-        lastError: serializeError(error),
-        nextAttemptAt,
+        lastError,
+        nextAttemptAt: Date.now() + delay,
       });
 
       this.events.emit('retry', {
@@ -223,26 +288,43 @@ export class QueueProcessor {
       return 'stop';
     }
 
-    await this.storage.update(request.id, {
-      status: 'failed',
-      updatedAt: Date.now(),
-      lastError: serializeError(error),
-    });
-    this.events.emit('failure', { request, error: serializeError(error) });
+    await this.storage.update(request.id, { status: 'failed', updatedAt: Date.now(), lastError });
+    this.events.emit('failure', { request, error: serializeError(error, { includeData: true }) });
     return 'failed';
   }
 
-  private async recoverStaleProcessing(): Promise<void> {
-    const all = await this.storage.getAll();
-    const now = Date.now();
-    const stale = all.filter(
-      (request) =>
-        request.status === 'processing' && now - request.updatedAt > this.staleProcessingThresholdMs
-    );
+  private resolvePolicy(request: QueuedRequest): RetryPolicy {
+    const policy = this.getPolicy();
+    return {
+      ...policy,
+      strategy: request.strategy ?? policy.strategy,
+      baseDelay: request.baseDelay ?? policy.baseDelay,
+      maxDelay: request.maxDelay ?? policy.maxDelay,
+    };
+  }
 
-    for (const request of stale) {
-      this.logger.warn(`Recovering stale processing request ${request.id}`);
-      await this.storage.update(request.id, { status: 'pending', updatedAt: now });
+  private isExpired(request: QueuedRequest): boolean {
+    const maxAge = this.getMaxRequestAge();
+    return maxAge !== undefined && Date.now() - request.createdAt > maxAge;
+  }
+
+  private async expire(request: QueuedRequest): Promise<void> {
+    const error = serializeError(new RetryError({ message: 'Request expired', reason: 'EXPIRED' }));
+    await this.storage.update(request.id, { status: 'failed', updatedAt: Date.now(), lastError: error });
+    this.events.emit('failure', { request, error });
+  }
+
+  /**
+   * Only one run is ever active and this is called at the start of one, so any
+   * request still marked 'processing' was interrupted by a crash or app kill.
+   */
+  private async recoverInterrupted(): Promise<void> {
+    const all = await this.storage.getAll();
+    for (const request of all) {
+      if (request.status === 'processing') {
+        this.logger.warn(`Recovering interrupted request ${request.id}`);
+        await this.storage.update(request.id, { status: 'pending', updatedAt: Date.now() });
+      }
     }
   }
 

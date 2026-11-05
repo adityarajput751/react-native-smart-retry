@@ -14,12 +14,13 @@ describe('ErrorClassifier', () => {
       expect(error.isNetworkError).toBe(true);
     });
 
-    it('classifies an AbortError as TIMEOUT', () => {
+    it('classifies an AbortError as ABORTED, not as a retryable timeout', () => {
       const abortError = new Error('aborted');
       abortError.name = 'AbortError';
       const error = classifyThrownError(abortError);
-      expect(error.reason).toBe('TIMEOUT');
-      expect(error.isTimeout).toBe(true);
+      expect(error.reason).toBe('ABORTED');
+      expect(error.isTimeout).toBe(false);
+      expect(isRetryable(error, { retryOn: () => true })).toBe(false);
     });
 
     it('classifies explicit timeout flag as TIMEOUT', () => {

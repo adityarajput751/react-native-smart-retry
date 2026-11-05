@@ -30,10 +30,8 @@ export class Logger {
     console.warn(`[SmartRetry] ${message}`, ...meta);
   }
 
+  /** Always printed, even with `debug` off: reserved for problems the app must fix. */
   error(message: string, ...meta: unknown[]): void {
-    if (!this.enabled) {
-      return;
-    }
     // eslint-disable-next-line no-console
     console.error(`[SmartRetry] ${message}`, ...meta);
   }

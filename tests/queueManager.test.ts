@@ -16,21 +16,22 @@ function makeManager(monitor: FakeNetworkMonitor) {
   const manager = new QueueManager({
     storage,
     networkManager,
-    fetchAdapter: new FetchAdapter(),
+    send: (request) => new FetchAdapter().execute(request),
     events,
     logger: new Logger(false),
     getPolicy: () => DEFAULT_RETRY_POLICY,
     getDefaultTimeout: () => 1000,
     preventDuplicates: () => true,
     getTransformBeforePersist: () => undefined,
-    staleProcessingThresholdMs: () => 60000,
   });
   return { manager, storage, events, networkManager };
 }
 
 describe('QueueManager', () => {
   it('suppresses a duplicate enqueue for the same uniqueKey while one is pending', async () => {
-    const { manager } = makeManager(new FakeNetworkMonitor({ isConnected: false, isInternetReachable: false }));
+    const { manager } = makeManager(
+      new FakeNetworkMonitor({ isConnected: false, isInternetReachable: false })
+    );
 
     const first = await manager.enqueue({
       url: '/attendance',
@@ -50,7 +51,9 @@ describe('QueueManager', () => {
   });
 
   it('allows a new request once the prior one with the same uniqueKey has failed permanently', async () => {
-    const { manager, storage } = makeManager(new FakeNetworkMonitor({ isConnected: false, isInternetReachable: false }));
+    const { manager, storage } = makeManager(
+      new FakeNetworkMonitor({ isConnected: false, isInternetReachable: false })
+    );
 
     const first = await manager.enqueue({ url: '/x', method: 'POST', uniqueKey: 'k1' });
     await storage.update(first.id, { status: 'failed' });
@@ -66,14 +69,13 @@ describe('QueueManager', () => {
     const manager = new QueueManager({
       storage,
       networkManager,
-      fetchAdapter: new FetchAdapter(),
+      send: (request) => new FetchAdapter().execute(request),
       events: new QueueEventEmitter(),
       logger: new Logger(false),
       getPolicy: () => DEFAULT_RETRY_POLICY,
       getDefaultTimeout: () => 1000,
       preventDuplicates: () => false,
       getTransformBeforePersist: () => undefined,
-      staleProcessingThresholdMs: () => 60000,
     });
 
     await manager.enqueue({ url: '/x', method: 'POST', uniqueKey: 'k1' });
@@ -84,7 +86,7 @@ describe('QueueManager', () => {
 
   it('automatically processes the queue when the network transitions from offline to online', async () => {
     const monitor = new FakeNetworkMonitor({ isConnected: false, isInternetReachable: false });
-    const { manager, storage } = makeManager(monitor);
+    const { manager } = makeManager(monitor);
     installMockFetch([{ type: 'response', status: 200, body: { ok: true } }]);
 
     await manager.initialize();
@@ -105,14 +107,13 @@ describe('QueueManager', () => {
     const manager = new QueueManager({
       storage,
       networkManager,
-      fetchAdapter: new FetchAdapter(),
+      send: (request) => new FetchAdapter().execute(request),
       events: new QueueEventEmitter(),
       logger: new Logger(false),
       getPolicy: () => DEFAULT_RETRY_POLICY,
       getDefaultTimeout: () => 1000,
       preventDuplicates: () => true,
       getTransformBeforePersist: () => (request) => ({ ...request, data: { redacted: true } }),
-      staleProcessingThresholdMs: () => 60000,
     });
 
     const item = await manager.enqueue({ url: '/x', method: 'POST', data: { password: 'secret' } });

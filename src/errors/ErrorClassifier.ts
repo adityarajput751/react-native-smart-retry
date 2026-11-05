@@ -27,12 +27,12 @@ export function classifyThrownError(error: unknown, options?: { wasTimeout?: boo
   }
 
   if (isAbortError(error)) {
-    return new RetryError({
-      message: 'Request aborted',
-      reason: 'TIMEOUT',
-      isTimeout: true,
-      cause: error,
-    });
+    return new RetryError({ message: 'Request aborted', reason: 'ABORTED', cause: error });
+  }
+
+  // React Native's fetch rejects with this when the native request times out.
+  if (error instanceof TypeError && getMessage(error).toLowerCase().includes('timed out')) {
+    return new RetryError({ message: getMessage(error), reason: 'TIMEOUT', isTimeout: true, cause: error });
   }
 
   if (isNetworkError(error)) {
@@ -57,7 +57,7 @@ export function classifyThrownError(error: unknown, options?: { wasTimeout?: boo
  */
 export function classifyStatusError(
   status: number,
-  options?: { retryOnStatusCodes?: number[]; retryAfterMs?: number; statusText?: string }
+  options?: { retryOnStatusCodes?: number[]; retryAfterMs?: number; statusText?: string; data?: unknown }
 ): RetryError {
   const reason = statusToReason(status, options?.retryOnStatusCodes);
   return new RetryError({
@@ -65,6 +65,7 @@ export function classifyStatusError(
     reason,
     status,
     retryAfterMs: options?.retryAfterMs,
+    data: options?.data,
   });
 }
 
@@ -98,6 +99,10 @@ export function isRetryable(
   error: RetryError,
   options?: { retryOnStatusCodes?: number[]; retryOn?: (error: unknown) => boolean }
 ): boolean {
+  if (error.reason === 'ABORTED' || error.reason === 'EXPIRED' || error.reason === 'QUEUE_FULL') {
+    return false;
+  }
+
   if (options?.retryOn) {
     return options.retryOn(error);
   }
@@ -115,6 +120,16 @@ export function isRetryable(
   }
 
   return false;
+}
+
+/**
+ * Whether a failed `queue: true` request belongs in the persistent queue:
+ * connectivity failures and retryable server responses do; permanent failures
+ * do not, because replaying them could only fail again. `retryOn` is not
+ * consulted, since it cannot survive persistence and so cannot govern replays.
+ */
+export function shouldQueue(error: RetryError, options?: { retryOnStatusCodes?: number[] }): boolean {
+  return isRetryable(error, { retryOnStatusCodes: options?.retryOnStatusCodes });
 }
 
 /** Parses a `Retry-After` header value: numeric seconds or an HTTP-date. Returns ms, or null. */
@@ -139,7 +154,12 @@ export function parseRetryAfter(headerValue: string | null | undefined): number 
   return null;
 }
 
-export function serializeError(error: RetryError): SerializedError {
+/**
+ * Converts a RetryError to plain data. `includeData` adds the response body;
+ * leave it off for anything written to storage, since bodies can be large or
+ * sensitive.
+ */
+export function serializeError(error: RetryError, options?: { includeData?: boolean }): SerializedError {
   return {
     message: error.message,
     name: error.name,
@@ -147,6 +167,7 @@ export function serializeError(error: RetryError): SerializedError {
     reason: error.reason,
     isNetworkError: error.isNetworkError,
     isTimeout: error.isTimeout,
+    ...(options?.includeData && error.data !== undefined ? { data: error.data } : {}),
   };
 }
 

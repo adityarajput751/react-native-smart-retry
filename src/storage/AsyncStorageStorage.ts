@@ -14,6 +14,7 @@ export interface AsyncStorageLike {
   multiGet?(keys: string[]): Promise<readonly [string, string | null][]>;
   multiSet?(keyValuePairs: [string, string][]): Promise<void>;
   multiRemove?(keys: string[]): Promise<void>;
+  getAllKeys?(): Promise<readonly string[]>;
 }
 
 const INDEX_KEY = '@react-native-smart-retry/queue-index';
@@ -28,9 +29,10 @@ function itemKey(id: string): string {
  * queued request under its own key plus a small index of ids, rather than one
  * large JSON blob, so a write to one request cannot corrupt the others.
  *
- * Writes are serialized through an internal promise chain (`runExclusive`)
+ * Operations are serialized through an internal promise chain (`runExclusive`)
  * because AsyncStorage provides no transactions — without this, concurrent
- * `add`/`remove` calls could race on the shared index array.
+ * calls could race on the shared index array. Reads of the whole queue go
+ * through the same chain, so they always see complete writes.
  */
 export class AsyncStorageStorage implements QueueStorage {
   private readonly storage: AsyncStorageLike;
@@ -42,55 +44,50 @@ export class AsyncStorageStorage implements QueueStorage {
 
   async add(request: QueuedRequest): Promise<void> {
     await this.runExclusive(async () => {
+      // Item before index: an id in the index must always point at a stored item,
+      // otherwise a reader would treat a half-written request as stale and drop it.
+      await this.storage.setItem(itemKey(request.id), JSON.stringify(request));
       const index = await this.readIndex();
       if (!index.includes(request.id)) {
         index.push(request.id);
         await this.writeIndex(index);
       }
-      await this.storage.setItem(itemKey(request.id), JSON.stringify(request));
     });
   }
 
-  async getAll(): Promise<QueuedRequest[]> {
-    const index = await this.readIndex();
-    if (index.length === 0) {
-      return [];
-    }
-
-    const keys = index.map(itemKey);
-    const pairs = this.storage.multiGet
-      ? await this.storage.multiGet(keys)
-      : await Promise.all(
-          keys.map(async (key): Promise<[string, string | null]> => [key, await this.storage.getItem(key)])
-        );
-
-    const results: QueuedRequest[] = [];
-    const staleIds: string[] = [];
-
-    for (let i = 0; i < index.length; i++) {
-      const id = index[i];
-      const raw = pairs[i]?.[1];
-      if (raw == null) {
-        staleIds.push(id);
-        continue;
+  getAll(): Promise<QueuedRequest[]> {
+    return this.runExclusive(async () => {
+      const index = await this.readIndex();
+      if (index.length === 0) {
+        return [];
       }
-      const parsed = this.safeParse(id, raw);
-      if (parsed) {
-        results.push(parsed);
-      } else {
-        staleIds.push(id);
-      }
-    }
 
-    if (staleIds.length > 0) {
-      await this.runExclusive(async () => {
-        const current = await this.readIndex();
-        const cleaned = current.filter((id) => !staleIds.includes(id));
-        await this.writeIndex(cleaned);
+      const keys = index.map(itemKey);
+      const pairs = this.storage.multiGet
+        ? await this.storage.multiGet(keys)
+        : await Promise.all(
+            keys.map(async (key): Promise<[string, string | null]> => [key, await this.storage.getItem(key)])
+          );
+
+      const results: QueuedRequest[] = [];
+      const staleIds: string[] = [];
+
+      index.forEach((id, i) => {
+        const raw = pairs[i]?.[1];
+        const parsed = raw == null ? null : this.safeParse(id, raw);
+        if (parsed) {
+          results.push(parsed);
+        } else {
+          staleIds.push(id);
+        }
       });
-    }
 
-    return results;
+      if (staleIds.length > 0) {
+        await this.writeIndex(index.filter((id) => !staleIds.includes(id)));
+      }
+
+      return results;
+    });
   }
 
   async get(id: string): Promise<QueuedRequest | null> {
@@ -152,12 +149,22 @@ export class AsyncStorageStorage implements QueueStorage {
       if (Array.isArray(parsed)) {
         return parsed.filter((entry): entry is string => typeof entry === 'string');
       }
-      logger.warn('Queue index was corrupted (not an array); resetting to empty.');
-      return [];
+      logger.warn('Queue index was corrupted (not an array); rebuilding it.');
     } catch (error) {
-      logger.warn('Failed to parse queue index; resetting to empty.', error);
+      logger.warn('Failed to parse queue index; rebuilding it.', error);
+    }
+    return this.rebuildIndex();
+  }
+
+  /** Recovers the ids from the item keys, so a damaged index cannot strand the whole queue. */
+  private async rebuildIndex(): Promise<string[]> {
+    if (!this.storage.getAllKeys) {
       return [];
     }
+    const keys = await this.storage.getAllKeys();
+    return keys
+      .filter((key) => key.startsWith(ITEM_KEY_PREFIX))
+      .map((key) => key.slice(ITEM_KEY_PREFIX.length));
   }
 
   private async writeIndex(index: string[]): Promise<void> {

@@ -38,20 +38,26 @@ describe('FetchAdapter', () => {
     const adapter = new FetchAdapter();
     const controller = new AbortController();
 
-    const promise = adapter.execute({ url: 'https://api.example.com/x', method: 'GET', signal: controller.signal });
+    const promise = adapter.execute({
+      url: 'https://api.example.com/x',
+      method: 'GET',
+      signal: controller.signal,
+    });
     controller.abort();
 
-    await expect(promise).rejects.toMatchObject({ reason: 'TIMEOUT', isTimeout: true });
+    await expect(promise).rejects.toMatchObject({ reason: 'ABORTED', isTimeout: false });
   });
 
   it('classifies a non-2xx response using the status code', async () => {
     installMockFetch([{ type: 'response', status: 400, body: { message: 'bad' } }]);
     const adapter = new FetchAdapter();
 
-    await expect(adapter.execute({ url: 'https://api.example.com/x', method: 'POST' })).rejects.toMatchObject({
-      reason: 'CLIENT_ERROR',
-      status: 400,
-    });
+    await expect(adapter.execute({ url: 'https://api.example.com/x', method: 'POST' })).rejects.toMatchObject(
+      {
+        reason: 'CLIENT_ERROR',
+        status: 400,
+      }
+    );
   });
 
   it('sends an Idempotency-Key header when idempotencyKey is provided', async () => {
@@ -89,5 +95,54 @@ describe('FetchAdapter', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(RetryError);
     }
+  });
+});
+
+describe('FetchAdapter response bodies', () => {
+  const stubFetch = (response: Partial<Response>): void => {
+    (global as unknown as { fetch: unknown }).fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      ...response,
+    }));
+  };
+  const lostBody = { text: () => Promise.reject(new TypeError('Network request failed')) };
+
+  it('returns invalid JSON from a 2xx as text rather than failing', async () => {
+    stubFetch({ text: async () => '<html>' });
+    const result = await new FetchAdapter().execute({ url: 'https://x.test', method: 'POST' });
+    expect(result.data).toBe('<html>');
+  });
+
+  it('parses +json content types', async () => {
+    stubFetch({
+      headers: new Headers({ 'content-type': 'application/problem+json' }),
+      text: async () => '{"a":1}',
+    });
+    const result = await new FetchAdapter().execute({ url: 'https://x.test', method: 'GET' });
+    expect(result.data).toEqual({ a: 1 });
+  });
+
+  it('keeps a POST successful when its response body is lost, so it is not replayed', async () => {
+    stubFetch(lostBody);
+    const result = await new FetchAdapter().execute({ url: 'https://x.test', method: 'POST' });
+    expect(result).toMatchObject({ status: 200, data: undefined });
+  });
+
+  it('fails a GET whose response body is lost, since retrying is safe', async () => {
+    stubFetch(lostBody);
+    await expect(new FetchAdapter().execute({ url: 'https://x.test', method: 'GET' })).rejects.toMatchObject({
+      reason: 'NETWORK_ERROR',
+    });
+  });
+
+  it('sends FormData untouched, without a JSON content type', async () => {
+    stubFetch({ text: async () => '' });
+    const data = new FormData();
+    await new FetchAdapter().execute({ url: 'https://x.test', method: 'POST', data });
+    const init = (global.fetch as jest.Mock).mock.calls[0][1] as RequestInit;
+    expect(init.body).toBe(data);
+    expect(init.headers).toEqual({});
   });
 });
